@@ -9,6 +9,7 @@ public class LuaApi : Attribute
     public string luaName = string.Empty;
     public string description = string.Empty;
     public string notes = string.Empty;
+    public string docUrl = string.Empty;
 }
 
 /// <summary>
@@ -24,6 +25,9 @@ public class LuaApiFunction : Attribute
     public string warning = string.Empty;
     public string success = string.Empty;
     public string codeExample = string.Empty;
+    public string docUrl = string.Empty;
+    public bool deprecated = false;
+    public string seeAlso = string.Empty;
 }
 
 /// <summary>
@@ -34,6 +38,7 @@ public class LuaApiVariable : Attribute
 {
     public string name = string.Empty;
     public string description = string.Empty;
+    public string docUrl = string.Empty;
 }
 
 /// <summary>
@@ -54,4 +59,13 @@ public class LuaApiEnumValue : Attribute
 {
     public string description = string.Empty;
     public bool hidden = false;
+}
+
+/// <summary>
+/// Used to document Lua function parameters
+/// </summary>
+[AttributeUsage(AttributeTargets.Parameter)]
+public class LuaApiParam : Attribute
+{
+    public string description = string.Empty;
 }

@@ -13,6 +13,9 @@ using UnityEngine;
 /// </summary>
 public static class LuaDocGenerator
 {
+    // Folder to emit LuaCATS annotations
+    private const string LuaCATSOutDir = "Assets/Scripts/Lua/Annotations";
+
     /// <summary>
     /// Info about a Lua API
     /// </summary>
@@ -166,6 +169,66 @@ public static class LuaDocGenerator
         }
 
         return result;
+    }
+
+    private static string TypeToLuaCats(Type type)
+    {
+        // Handle nullable
+        if (Nullable.GetUnderlyingType(type) != null)
+        {
+            var inner = Nullable.GetUnderlyingType(type);
+            return TypeToLuaCats(inner) + "?";
+        }
+
+        // Arrays
+        if (type.IsArray)
+        {
+            var elem = type.GetElementType();
+            return TypeToLuaCats(elem) + "[]";
+        }
+
+        // Generics (basic support for List<T>, Dictionary<K,V>)
+        if (type.IsGenericType)
+        {
+            var genDef = type.GetGenericTypeDefinition();
+            var args = type.GetGenericArguments();
+            if (genDef == typeof(List<>) || genDef == typeof(IList<>) || genDef == typeof(IEnumerable<>))
+            {
+                return TypeToLuaCats(args[0]) + "[]";
+            }
+            if (genDef == typeof(Dictionary<,>))
+            {
+                return $"table<{TypeToLuaCats(args[0])},{TypeToLuaCats(args[1])}>";
+            }
+        }
+
+        // Common primitives
+        if (type == typeof(void)) return "nil";
+        if (type == typeof(bool) || type == typeof(bool?)) return "boolean";
+        if (type == typeof(string)) return "string";
+        if (type == typeof(char)) return "string";
+        if (type == typeof(byte) || type == typeof(sbyte) || type == typeof(short) || type == typeof(ushort) ||
+            type == typeof(int) || type == typeof(uint) || type == typeof(long) || type == typeof(ulong) ||
+            type == typeof(float) || type == typeof(double) || type == typeof(decimal)) return "number";
+
+        // MoonSharp specifics
+        if (type.FullName == "MoonSharp.Interpreter.Table") return "table";
+        if (type.FullName == "MoonSharp.Interpreter.DynValue") return "any";
+
+        // Unity common structs as opaque types
+        if (type.Namespace != null && type.Namespace.StartsWith("UnityEngine")) return "any";
+
+        // Enums as integer
+        if (type.IsEnum) return "integer";
+
+        // Fallback
+        return "any";
+    }
+
+    private static string EscapeMultiline(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+        return text.Replace("\r\n", "\n").Replace("\r", "\n");
     }
 
     /// <summary>
@@ -403,6 +466,183 @@ public static class LuaDocGenerator
         }
 
         EditorGUIUtility.systemCopyBuffer = snippets.ToString();
+    }
+
+    [MenuItem("Lua/Docs/Generate Annotations Files (LuaCATS)")]
+    public static void GenerateLuaCATSFiles()
+    {
+        if (!Directory.Exists(LuaCATSOutDir))
+            Directory.CreateDirectory(LuaCATSOutDir);
+
+        foreach (LuaApiInfo apiInfo in GetAllApiInfo())
+        {
+            LuaApi classData = apiInfo.Attribute;
+            var classFilePath = Path.Combine(LuaCATSOutDir, classData.luaName + ".lua");
+            using var sw = new StreamWriter(classFilePath, false, new UTF8Encoding(false));
+
+            sw.WriteLine("---@meta");
+            sw.WriteLine();
+
+            foreach (var line in EscapeMultiline(classData.description).Split("\n"))
+            {
+                sw.WriteLine("--- {0}", line);
+            }
+
+            if (!string.IsNullOrEmpty(classData.notes))
+            {
+                sw.WriteLine("---");
+                sw.WriteLine("--- <b>Notes</b>:");
+                foreach (var line in EscapeMultiline(classData.notes).Split('\n'))
+                    sw.WriteLine("--- - {0}", line);
+            }
+
+            if (!string.IsNullOrEmpty(classData.docUrl))
+            {
+                sw.WriteLine("---");
+                sw.WriteLine("--- <b>Doc</b>: {0}", classData.docUrl);
+            }
+
+            sw.WriteLine("---@class {0}", classData.luaName);
+
+            foreach (var variable in apiInfo.variables)
+            {
+                var vAttr = variable.Attribute;
+                var vType = TypeToLuaCats(variable.FieldInfo.FieldType);
+                var vDoc = vAttr.docUrl;
+
+                sw.Write("---@field {0} {1}", variable.Attribute.name, vType);
+                if (!string.IsNullOrEmpty(vAttr.description))
+                    sw.Write(" {0}", vAttr.description.Replace('\n', ' '));
+                if (!string.IsNullOrEmpty(vDoc))
+                    sw.Write(" [See: {0}]", vDoc);
+                sw.WriteLine();
+            }
+
+            sw.WriteLine("{0} = {{}}", classData.luaName);
+            sw.WriteLine();
+
+            foreach (var functionInfo in apiInfo.functions)
+            {
+                var methodData = functionInfo.Attribute;
+
+                if (methodData.deprecated)
+                    sw.WriteLine("---@deprecated");
+
+                var parameters = functionInfo.MethodInfo.GetParameters();
+                foreach (var p in parameters)
+                {
+                    string pType = TypeToLuaCats(p.ParameterType);
+                    string pDesc = string.Empty;
+                    if (Attribute.GetCustomAttribute(p, typeof(LuaApiParam)) is LuaApiParam pAttr)
+                    {
+                        pDesc = pAttr.description;
+                    }
+                    if (string.IsNullOrEmpty(pDesc))
+                        sw.WriteLine("---@param {0} {1}", p.Name, pType);
+                    else
+                        sw.WriteLine("---@param {0} {1} {2}", p.Name, pType, pDesc.Replace('\n', ' '));
+                }
+
+                var retType = TypeToLuaCats(functionInfo.MethodInfo.ReturnType);
+                if (retType != "nil")
+                {
+                    if (!string.IsNullOrEmpty(methodData.returns))
+                        sw.WriteLine("---@return {0} {1}", retType, methodData.returns.Replace('\n', ' '));
+                    else
+                        sw.WriteLine("---@return {0}", retType);
+                }
+
+                foreach (var line in EscapeMultiline(methodData.description).Split("\n"))
+                {
+                    sw.WriteLine("--- {0}", line);
+                }
+
+                if (!string.IsNullOrEmpty(methodData.notes))
+                {
+                    sw.WriteLine("---");
+                    sw.WriteLine("--- <b>Notes</b>: ");
+                    foreach (var line in EscapeMultiline(methodData.notes).Split('\n'))
+                    {
+                        sw.WriteLine("--- - {0}", line);
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(methodData.warning))
+                {
+                    sw.WriteLine("---");
+                    sw.WriteLine("--- <b>⚠ Warning</b>:");
+                    foreach (var line in EscapeMultiline(methodData.warning).Split('\n'))
+                    {
+                        sw.WriteLine("--- {0}", line);
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(methodData.success))
+                {
+                    sw.WriteLine("---");
+                    sw.WriteLine("--- <b>✓ Success</b>:");
+                    foreach (var line in EscapeMultiline(methodData.success).Split('\n'))
+                    {
+                        sw.WriteLine("--- {0}", line);
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(methodData.codeExample))
+                {
+                    sw.WriteLine("---");
+                    sw.WriteLine("--- <b>Example</b>:");
+                    sw.WriteLine("--- ```lua");
+                    foreach (var line in EscapeMultiline(methodData.codeExample).Split('\n'))
+                        sw.WriteLine("--- {0}", line);
+                    sw.WriteLine("--- ```");
+                }
+
+                if (!string.IsNullOrEmpty(methodData.docUrl))
+                    sw.WriteLine("---\n--- <b>Doc</b>: {0}", methodData.docUrl);
+
+                if (!string.IsNullOrEmpty(methodData.seeAlso))
+                {
+                    sw.WriteLine("---");
+                    foreach (var part in methodData.seeAlso.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                        sw.WriteLine("---@see {0}", part.Trim());
+                }
+
+                var callParams = string.Join(", ", parameters.Select(p => p.Name));
+                sw.WriteLine("function {0}.{1}({2}) end", classData.luaName, methodData.name, callParams);
+                sw.WriteLine();
+            }
+        }
+
+        var enums = GetAllEnums();
+        if (enums.Count > 0)
+        {
+            var enumFilePath = Path.Combine(LuaCATSOutDir, "Constants.lua");
+            using var sw = new StreamWriter(enumFilePath, false, new UTF8Encoding(false));
+
+            sw.WriteLine("---@meta");
+            sw.WriteLine();
+
+            foreach (var enumInfo in enums)
+            {
+                string key = string.Empty;
+                if (!string.IsNullOrEmpty(enumInfo.Attribute.description)) key = EscapeMultiline(enumInfo.Attribute.description).Trim('\n').Trim(' ') + " ";
+                sw.WriteLine("---@enum {0}{1}", key, enumInfo.Attribute.name);
+                sw.WriteLine("{0} = {{", enumInfo.Attribute.name);
+                foreach (var v in enumInfo.values)
+                {
+                    if (v.Attribute != null && v.Attribute.hidden) continue;
+                    var numeric = 0;
+                    try { numeric = Convert.ToInt32(Enum.Parse(enumInfo.ApiType, v.StringValue)); }
+                    catch { }
+                    sw.WriteLine("    {0} = {1},", v.StringValue, numeric);
+                }
+                sw.WriteLine("}");
+                sw.WriteLine();
+            }
+        }
+
+        AssetDatabase.Refresh();
+        Logger.Log(Channel.Lua, "LuaCATS annotations generated to {0}", LuaCATSOutDir);
     }
 
     private class AtomSnippet
